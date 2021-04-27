@@ -21,12 +21,12 @@
 
 #### 使用说明
 
-mkdir build
-cd build
-cmake3 ../
-make
+    mkdir build
+    cd build
+    cmake3 ../
+    make
 
-../build_out/bin/memtest
+    ../build_out/bin/memtest
 
 #### 参与贡献
 

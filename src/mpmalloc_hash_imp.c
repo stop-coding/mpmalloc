@@ -12,6 +12,7 @@
 
 #define MP_HASH_ASSERT   assert
 #define MP_LOG_ERROR(format, arg...) printf("ERROR [%s,%d]:  "format"\n", __FUNCTION__, __LINE__, ##arg)
+#define MP_LOG_WARN(format, arg...) printf("WARN [%s,%d]:  "format"\n", __FUNCTION__, __LINE__, ##arg)
 //#define MP_LOG_DEBUG(format, arg...) printf("DEBUG [%s,%d]:  "format"\n", __FUNCTION__, __LINE__, ##arg)
 #define MP_LOG_DEBUG(format, arg...)
 
@@ -70,6 +71,7 @@ static  inline struct mp_mem_head *mp_unpack(char *mem, struct mp_hash_slice *sl
 {
     slice->alloc_mem = (struct mp_mem_head *)(mem - sizeof(struct mp_mem_head));
     if (((struct mp_mem_head *)slice->alloc_mem)->magic ^ MP_UNIT_MAGIC) {
+        abort();
         return NULL;
     }
     slice->node_id = ((struct mp_mem_head *)slice->alloc_mem)->node_id;
@@ -152,7 +154,7 @@ static inline size_t mp_hash_mempool_avail_count_imp(mp_mempool_t *mp)
 #define MP_HASH_MAX_ACTIVE_MEMPOOL_NUM      1
 
 /* 哈希表的NODE最小值，小于该值，则不需要哈希表查找*/
-#define MP_HASH_NODE_MIN_NUM                4
+#define MP_HASH_NODE_MIN_NUM                128
 
 #define MP_HASH_INVALID_MEMPOOL_ID          (MP_HASH_MAX_MEMPOOL_NUM + 1)
 
@@ -199,10 +201,11 @@ static int mp_hash_node_get_slice(struct mp_hash_node *node, struct mp_hash_slic
 static void mp_hash_node_put_slice(struct mp_hash_node *node, const struct mp_hash_slice *slice);
 
 static int mp_hash_any_alloc_imp(size_t alloc_size, struct mp_hash_slice *slice);
+static void mp_hash_any_realloc_imp(size_t new_size, struct mp_hash_slice *slice);
 static void mp_hash_any_free_imp(const struct mp_hash_slice *slice);
 
 static void mp_hash_sort(struct mp_hash_node *nodes, int nodes_num);
-static int mp_hash_interpolation_search(struct mp_hash_node *nodes, int nodes_num, size_t key);
+static int mp_hash_mem_skip_search(struct mp_hash_node *nodes, int nodes_num, size_t key);
 
 void *mp_hash_create_imp(const struct mp_unit *arr, int arr_num)
 {
@@ -210,6 +213,8 @@ void *mp_hash_create_imp(const struct mp_unit *arr, int arr_num)
     int rc;
     khiter_t k;
     int ret;
+    size_t min_mem_size = 0;
+    size_t max_mem_size = 0;
     struct mp_hash_imp *imp;
 
     if (!arr) {
@@ -230,7 +235,7 @@ void *mp_hash_create_imp(const struct mp_unit *arr, int arr_num)
         goto fail;
     }
 
-    if (imp->node_num >= MP_HASH_NODE_MIN_NUM) {
+    if (imp->node_num <= MP_HASH_NODE_MIN_NUM) {
         imp->h = kh_init(hash_32);
         if (!imp->h) {
             MP_LOG_ERROR("kh_init fail.");
@@ -250,6 +255,8 @@ void *mp_hash_create_imp(const struct mp_unit *arr, int arr_num)
             MP_LOG_ERROR("mp_hash_node_init fail.");
             goto fail;
         }
+        min_mem_size += (arr[i].size *arr[i].capacity);
+        max_mem_size += (arr[i].size *arr[i].capacity * imp->nodes[i].mempool_max_num);
         imp->nodes[i].id = i;
         if (!imp->h) {
             continue;
@@ -262,8 +269,8 @@ void *mp_hash_create_imp(const struct mp_unit *arr, int arr_num)
         MP_LOG_DEBUG("hash table[%p] map node[%d] on key[%lu].", imp->h, i, imp->nodes[i].size);
         kh_value(imp->h, k) = &(imp->nodes[i]);
     }
-    //mp_hash_sort(imp->nodes, imp->node_num); // 排个序
-
+    mp_hash_sort(imp->nodes, imp->node_num); // 排个序
+    MP_LOG_DEBUG("Register mempool size: Min [%luKB],  Max [%luKB].", min_mem_size/1024 + 1, max_mem_size/1024 + 1);
     return imp;
 fail:
     mp_hash_destroy_imp(imp);
@@ -322,7 +329,7 @@ void *mp_hash_alloc_imp(void* mh, size_t size)
     }
 
     if (!node) {
-        find_index = mp_hash_interpolation_search(imp->nodes, imp->node_num, total_size);
+        find_index = mp_hash_mem_skip_search(imp->nodes, imp->node_num, total_size);
         if (imp->nodes[find_index].size >= total_size) {
             node = &imp->nodes[find_index];
         }
@@ -344,6 +351,59 @@ void *mp_hash_alloc_imp(void* mh, size_t size)
     MP_LOG_DEBUG("alloc ptr[%p] node_id[%d],mempool_id[%d].", slice.alloc_mem, slice.node_id, slice.mempool_id);
     return mp_pack(&slice);
 }
+
+void *mp_hash_realloc_imp(void* mh, void *mem, size_t newsize)
+{
+    struct mp_hash_imp *imp;
+    size_t total_size;
+    struct mp_hash_slice slice = {};
+    struct mp_mem_head *mem_head;
+    void *new_mem;
+
+    if (!mh) {
+        MP_LOG_ERROR("null ptr.");
+        return NULL;
+    }
+
+    if (!mem) {
+        return mp_hash_alloc_imp(mh, newsize);
+    }
+
+    if (newsize == 0) {
+        mp_hash_free_imp(mh, mem);
+        return NULL;
+    }
+
+    mem_head = mp_unpack((char *)mem, &slice);
+    if (!mem_head) {
+        MP_LOG_ERROR("mp_unpack ptr[%p] fail, maybe not valid memery for mp.", mem);
+        return NULL;
+    }
+    imp = (struct mp_hash_imp *)mh;
+    total_size = newsize + sizeof(struct mp_mem_head);
+    if (slice.node_id < imp->node_num) {
+        if (total_size <= imp->nodes[slice.node_id].size) {
+            return mem;
+        } 
+        new_mem = mp_hash_alloc_imp(mh, total_size);
+        if (!new_mem) {
+            return NULL;
+        }
+        /* 拷贝数据 */
+        memcpy(new_mem, mem, imp->nodes[slice.node_id].size - sizeof(struct mp_mem_head));
+        /* 新内存分配成功 需要释放旧的*/
+        mp_hash_node_put_slice(&imp->nodes[slice.node_id], &slice);
+        return new_mem;
+    } else {
+        mp_hash_any_realloc_imp(total_size, &slice);
+        if (!slice.alloc_mem) {
+            return NULL;
+        }
+        return mp_pack(&slice);
+    } 
+}
+
+
 void mp_hash_free_imp(void* mh, void *mem)
 {
     struct mp_hash_imp *imp;
@@ -512,8 +572,8 @@ static int mp_hash_node_get_slice(struct mp_hash_node *node, struct mp_hash_slic
         if (slice->alloc_mem) {
             slice->mempool_id = i;
             slice->mempool_ptr = node->mempools[i].handle;
-            MP_LOG_DEBUG("increase mempool id[%d], mempool_active[%d], mempool addr[%p]", 
-                        slice->mempool_id, (int)node->mempool_active, node->mempools[i].handle);
+            MP_LOG_WARN("increase mempool id[%d], mempool_active[%d], mempool addr[%p], size[%lu]", 
+                        slice->mempool_id, (int)node->mempool_active, node->mempools[i].handle, node->size);
         } else {
             MP_LOG_ERROR("mempool[%d] get fail, pool addr:%p", i, node->mempools[i].handle);
         }
@@ -566,8 +626,8 @@ static void mp_hash_node_put_slice(struct mp_hash_node *node, const struct mp_ha
             }
             left_capacity += mp_hash_mempool_avail_count_imp(node->mempools[i].handle);
         }
-        MP_LOG_DEBUG("node[%d] total mempools avail capacity: %ld.", node->id, left_capacity);
-        MP_LOG_DEBUG("mempool_id[%d] capacity: %ld", slice->mempool_id, node->mempools[slice->mempool_id].capacity);
+        MP_LOG_WARN("node[%d] total mempools avail capacity: %ld.", node->id, left_capacity);
+        MP_LOG_WARN("mempool_id[%d] capacity: %ld", slice->mempool_id, node->mempools[slice->mempool_id].capacity);
         if (left_capacity > node->mempools[slice->mempool_id].capacity/4) {
             mp_rwlock_unlock(&node->mempools_rwlock);
             mp_rwlock_wrlock(&node->mempools_rwlock);
@@ -575,7 +635,7 @@ static void mp_hash_node_put_slice(struct mp_hash_node *node, const struct mp_ha
                 mp_hash_mempool_free_imp(node->mempools[slice->mempool_id].handle);
                 node->mempools[slice->mempool_id].capacity = 0;
                 node->mempool_active--;
-                MP_LOG_DEBUG("decrease mempool id[%d], mempool active[%d], mempool addr [%p]", 
+                MP_LOG_WARN("decrease mempool id[%d], mempool active[%d], mempool addr [%p]", 
                             slice->mempool_id, (int)node->mempool_active, node->mempools[slice->mempool_id].handle);
                 node->mempools[slice->mempool_id].handle = NULL;
             }
@@ -585,7 +645,16 @@ static void mp_hash_node_put_slice(struct mp_hash_node *node, const struct mp_ha
     return;
 }
 
-static int mp_hash_any_alloc_imp(size_t alloc_size, struct mp_hash_slice *slice)
+static inline void mp_hash_any_realloc_imp(size_t new_size, struct mp_hash_slice *slice)
+{
+    /* 内部接口，避免重复校验，入参由调用者校验 */
+    if (!slice->alloc_mem) {
+        MP_LOG_ERROR("free memery null");
+    }
+    slice->alloc_mem =  mp_hash_realloc(slice->alloc_mem, new_size);
+}
+
+static inline int mp_hash_any_alloc_imp(size_t alloc_size, struct mp_hash_slice *slice)
 {
     /* 内部接口，避免重复校验，入参由调用者校验 */
     slice->alloc_mem = mp_hash_malloc(alloc_size);
@@ -600,7 +669,7 @@ static int mp_hash_any_alloc_imp(size_t alloc_size, struct mp_hash_slice *slice)
     return MP_OK;
 }
 
-static void mp_hash_any_free_imp(const struct mp_hash_slice *slice)
+static inline void mp_hash_any_free_imp(const struct mp_hash_slice *slice)
 {
     /* 内部接口，避免重复校验，入参由调用者校验 */
     MP_HASH_ASSERT(slice->mempool_id == MP_HASH_INVALID_MEMPOOL_ID);
@@ -611,59 +680,93 @@ static void mp_hash_any_free_imp(const struct mp_hash_slice *slice)
     return;
 }
 
-static int mp_hash_interpolation_search(struct mp_hash_node *nodes, int nodes_num, size_t key)
+static inline void mp_hash_swap(struct mp_hash_node *a, struct mp_hash_node *b)
 {
-	int low = 0;
-	int high = nodes_num - 1;
-	int mid = 0; 
-    int index = high;
-    /* 内部接口，避免重复校验，入参由调用者校验 */
-    MP_LOG_DEBUG("start low[%d] high[%d] mid[%d] index[%d]", low, high, mid, index);
-    if (key >= nodes[high].size) {
-        return high;
-    }
-    
-    if (key <= nodes[low].size) {
-        return low;
-    }
+    struct mp_hash_node tmp;
 
-	while (low <= high) {
-        if (key < nodes[low].size) {
-            return low;
-        }
-		mid = low + (high - low)*(key - nodes[low].size) / (nodes[high].size - nodes[low].size);//插值
-		if (key < nodes[mid].size){
-			high = mid - 1;
-            index = mid;
-		} else if(key > nodes[mid].size) {
-			low = mid + 1;
-		} else {
-			return mid;
-		}
-        MP_LOG_DEBUG("low[%d] high[%d] mid[%d] index[%d]", low, high, mid, index);
-	}
-
-	return index;
+    tmp = *a;
+    *a = *b;
+    a->id = tmp.id;
+    tmp.id = b->id;
+	*b = tmp;
 }
 
 static void mp_hash_sort(struct mp_hash_node *nodes, int nodes_num)
 {
 	int i, j;
     int flag = 0;
-    struct mp_hash_node tmp;
 
     /* 内部接口，避免重复校验，入参由调用者校验 */
-    for (i = 0;i < nodes_num - 1; i++) {
+    for (i = 0; i < nodes_num - 1; i++) {
         flag = 0;
 		for (j = 0; j < nodes_num - i - 1; j++){
 			if(nodes[j].size > nodes[j + 1].size){
-				tmp = nodes[j];
-                nodes[j] = nodes[j + 1];
-				nodes[j + 1] = tmp;
+                mp_hash_swap(&nodes[j], &nodes[j + 1]);
 				flag = 1;
 			}
         }
         if (flag == 0)
             break;
     }
+}
+
+#define MP_SIZE_SWAP(a, b) \
+{                   \
+    a = a ^ b;      \
+    b = a ^ b;      \
+    a = a ^ b;      \
+}
+
+static inline int mp_hash_find_mid(const struct mp_hash_node *nodes, size_t key, int *high, int *low, int *index)
+{
+    int mid_1, mid_2;
+
+    if (*high > *low) {
+        mid_1 = *low + (*high - *low)*(key - nodes[*low].size) / (nodes[*high].size - nodes[*low].size);
+        mid_2 = (*high + *low) / 2;
+        if (mid_1 > mid_2) {
+            MP_SIZE_SWAP(mid_1, mid_2)
+        }
+    }else{
+        mid_1 = mid_2 = *high;
+    }
+    if (key < nodes[mid_1].size) {
+        *index = mid_1;
+        *high = mid_1 - 1;
+    }  else if (key == nodes[mid_1].size) {
+        *index = mid_1;
+        return -1;
+    }else if (key > nodes[mid_2].size) {
+        *low = mid_2 + 1;
+    }else if (key == nodes[mid_2].size) {
+        *index = mid_2;
+        return -1;
+    } else {
+        *index = mid_2;
+        *high = mid_2 - 1;
+        *low = mid_1 + 1;
+    }
+    return 0;
+}
+
+static int mp_hash_mem_skip_search(struct mp_hash_node *nodes, int nodes_num, size_t key)
+{
+	int low = 0;
+	int high = nodes_num - 1;
+    int index = high;
+
+    /* 内部接口，避免重复校验，入参由调用者校验 */
+    MP_LOG_DEBUG("start low[%d] high[%d] index[%d], key[%lu]", low, high, index, key);
+	while (low <= high) {
+		if (key <= nodes[low].size) {
+            return low;
+        } else if(key > nodes[high].size) {
+            return index;
+        }else{
+            if (mp_hash_find_mid(nodes, key, &high, &low, &index) != 0) {
+                break;
+            }
+        }
+	}
+	return index;
 }

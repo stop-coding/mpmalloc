@@ -21,6 +21,7 @@ struct mp_handle {
 /*内存分配算法实现的回调函数*/
 typedef void *(*mp_create_fn)(const struct mp_unit *arr, int arr_num);
 typedef void *(*mp_alloc_fn)(void * mh, size_t  size);
+typedef void *(*mp_realloc_fn)(void * mh, void *mem, size_t  newsize);
 typedef void (*mp_free_fn)(void * mh, void *mem);
 typedef void (*mp_destroy_fn)(void * mh);
 
@@ -30,6 +31,7 @@ struct mp_method
     mp_method_t name;
     mp_create_fn create;
     mp_alloc_fn alloc;
+    mp_realloc_fn realloc;
     mp_free_fn free;
     mp_destroy_fn destroy;
 };
@@ -39,6 +41,7 @@ static const struct mp_method g_methods[] =
     {MP_METHOD_E_DEFAULT,
     mp_hash_create_imp,
     mp_hash_alloc_imp,
+    mp_hash_realloc_imp,
     mp_hash_free_imp,
     mp_hash_destroy_imp
     },             /* default*/
@@ -102,18 +105,11 @@ void mp_destroy(struct mp_handle* mh)
 
 void *mp_malloc(struct mp_handle* mh, size_t size)
 {
-    void *ptr;
     if (!mh) {
         MP_LOG_ERROR("mh null.");
         return NULL;
     }
-
-    if (size <= 0) {
-        MP_LOG_DEBUG("size[%ld] invalid.", size);
-        return NULL;
-    }
-    ptr =  g_methods[mh->method_id].alloc(mh->method_imp, size);
-    return ptr;
+    return g_methods[mh->method_id].alloc(mh->method_imp, size);
 }
 void *mp_calloc(struct mp_handle* mh, size_t nitems, size_t size)
 {
@@ -121,25 +117,25 @@ void *mp_calloc(struct mp_handle* mh, size_t nitems, size_t size)
 
     ptr = mp_malloc(mh, nitems * size);
     if (!ptr) {
-        MP_LOG_DEBUG("mp_malloc fail.");
         return NULL;
     }
     memset(ptr, 0, nitems * size);
     return ptr;
 }
+
 void *mp_realloc(struct mp_handle* mh, void *p, size_t size)
 {
-    if (p) {
-        mp_free(mh, p);
+    if (!mh) {
+        MP_LOG_ERROR("mh null.");
+        return NULL;
     }
-    return mp_malloc(mh, size);
+    return g_methods[mh->method_id].realloc(mh->method_imp, p, size);
 }
 
 void mp_free(struct mp_handle* mh, void *p)
 {
-    
-    if (!p || !mh) {
-        MP_LOG_DEBUG("mh[%p] invalid, %p.", mh, p);
+    if (!mh) {
+        MP_LOG_ERROR("mh[%p] invalid, free pointer: %p.", mh, p);
         return;
     }
     g_methods[mh->method_id].free(mh->method_imp, p);

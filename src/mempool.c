@@ -24,13 +24,17 @@ struct mempool_imp{
     pthread_mutex_t lck;
 };
 
-struct mempool_slice{
-    QUEUE       q;
-    char        id;
-    char        magic;
-    char        reserved[2];
-    char    data[0];     
-};
+/* 内存单元编解码*/
+#define PACKED_MEMORY(__declaration__) \
+		__declaration__ __attribute__((__packed__))
+
+PACKED_MEMORY(struct mempool_slice{
+    QUEUE               q;
+    unsigned char        magic;
+    unsigned char        id;
+    unsigned char        reserved[2];
+    char                data[0];     
+});
 
 struct mempool_imp *mempool_create_imp(int id, size_t count, size_t ele_size)
 {
@@ -136,7 +140,6 @@ void *mempool_get_imp(struct mempool_imp *mp)
     if (!slice) {
         return NULL;
     }
-
     return slice->data;
 }
 
@@ -145,13 +148,14 @@ void mempool_put_imp(struct mempool_imp *mp, void *ele)
     int rc;
     QUEUE* iter;
     struct mempool_slice *slice;
-
     if (!mp || !ele) {
+        abort();
         return;
     }
 
     slice = (struct mempool_slice*)(((char*)ele - sizeof(struct mempool_slice)));
-    if (slice->magic != MEMPOOL_MAGIC) {
+    if (slice->magic ^ MEMPOOL_MAGIC) {
+        abort();
         return;
     }
 
@@ -174,7 +178,7 @@ size_t mempool_use_count_imp(struct mempool_imp *mp)
     if (!mp) {
         return 0;
     }
-    return mp->count;
+    return mp->used_cnt;
 }
 
 size_t mempool_avail_count_imp(struct mempool_imp *mp)

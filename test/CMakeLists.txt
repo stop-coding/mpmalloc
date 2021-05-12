@@ -7,11 +7,14 @@ set(ROOT_PATH "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(SRC_PATH "${ROOT_PATH}/test")
 set(MEM_SRC_PATH "${ROOT_PATH}/src")
 
-set(CMAKE_CXX_FLAGS_DEBUG "$ENV{CXXFLAGS} -O0 -Wextra -Wall -g -ggdb -std=c++11 -fPIC")
-set(CMAKE_CXX_FLAGS_RELEASE "$ENV{CXXFLAGS} -Wextra -O0 -Wall -g -ggdb -std=c++11 -fPIC")
+set(CMAKE_CXX_FLAGS_DEBUG "$ENV{CXXFLAGS} -O0 -Wextra -Wall -g2  -fPIC")
+set(CMAKE_CXX_FLAGS_RELEASE "$ENV{CXXFLAGS} -Wextra -O0 -Wall -g2  -fPIC")
 
-file(GLOB_RECURSE CFILES "${CMAKE_SOURCE_DIR}/*.c")
-SET_SOURCE_FILES_PROPERTIES(${CFILES} PROPERTIES LANGUAGE CXX )
+set(CMAKE_C_FLAGS_DEBUG "$ENV{CXXFLAGS} -O0 -Wextra -Wall -g2  -ggdb3 -fPIC")
+set(CMAKE_C_FLAGS_RELEASE "$ENV{CXXFLAGS} -Wextra -O0 -Wall -g2  -fPIC")
+
+set(CMAKE_BUILD_TYPE "Debug")
+set(DEBUG_FLAG ${CMAKE_C_FLAGS_DEBUG})
 
 SET(EXECUTABLE_OUTPUT_PATH ${ROOT_PATH}/build_out/bin)       #设置可执行文件的输出目录
 SET(LIBRARY_OUTPUT_PATH ${ROOT_PATH}/build_out/lib)           #设置库文件的输出目录

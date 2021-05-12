@@ -15,6 +15,11 @@ add_definitions(-D CLANG)
 set(COM_ROOT_PATH "${CMAKE_CURRENT_SOURCE_DIR}")
 set(SRC_PATH "${COM_ROOT_PATH}/src")
 
+set(CMAKE_C_FLAGS_DEBUG "$ENV{CXXFLAGS} -O0 -Wextra -Wall -g2  -ggdb3 -fPIC")
+set(CMAKE_C_FLAGS_RELEASE "$ENV{CXXFLAGS} -Wextra -O0 -Wall -g2  -fPIC")
+
+set(CMAKE_BUILD_TYPE "Debug")
+set(DEBUG_FLAG ${CMAKE_C_FLAGS_DEBUG})
 
 #设置输出路径
 SET(EXECUTABLE_OUTPUT_PATH ${COM_ROOT_PATH}/build_out/bin)       #设置可执行文件的输出目录
